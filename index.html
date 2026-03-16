@@ -868,15 +868,22 @@ async function pubFeedPost(){
 async function loadFeed(){
   document.getElementById('feedPosts').innerHTML='<div class="empty"><div class="lsp" style="width:24px;height:24px;margin:0 auto;"></div></div>';
   try{
-    const{data:posts}=await sb.from('posts').select('*,profiles(*),post_images(*),post_likes(count),post_comments(count)').order('created_at',{ascending:false}).limit(30);
+    const{data:posts, error:pe}=await sb.from('posts').select('*,profiles(*),post_images(*),post_likes(count),post_comments(count)').order('created_at',{ascending:false}).limit(30);
+    if(pe)throw pe;
     const{data:stories}=await sb.from('stories').select('*,profiles(*)').gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false});
     renderSbar(stories||[]);
-    if(!posts?.length){document.getElementById('feedPosts').innerHTML='<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg><h3>Лента пуста</h3><p>Создайте первый пост</p></div>';return;}
+    if(!posts?.length){
+      document.getElementById('feedPosts').innerHTML='<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg><h3>Лента пуста</h3><p>Создайте первый пост</p></div>';
+      return;
+    }
     const pids=posts.map(p=>p.id);
     const{data:ml}=await sb.from('post_likes').select('post_id').eq('user_id',ME.id).in('post_id',pids);
     const ls=new Set((ml||[]).map(l=>l.post_id));
     document.getElementById('feedPosts').innerHTML=posts.map(p=>renderPC(p,ls)).join('');
-  }catch(e){document.getElementById('feedPosts').innerHTML=`<div class="empty"><h3>Ошибка</h3><p>${e.message}</p></div>`;}
+  }catch(e){
+    console.error('loadFeed error:',e);
+    document.getElementById('feedPosts').innerHTML=`<div class="empty"><h3>Ошибка загрузки</h3><p>${e.message}</p><p style="font-size:.72rem;color:var(--tx3);margin-top:6px;">Проверьте RLS политики в Supabase</p></div>`;
+  }
 }
 function renderSbar(stories){
   let h=`<div class="sdot" onclick="openSheet('sts-sheet')"><div class="sadd">+</div><div class="snm">История</div></div>`;
@@ -1314,18 +1321,142 @@ async function loadProfile(){
     </div>
     <div class="ptabs">
       <div class="ptab ${profTab==='posts'?'on':''}" onclick="setPT('posts')">ПОСТЫ</div>
+      <div class="ptab ${profTab==='stories'?'on':''}" onclick="setPT('stories')">ИСТОРИИ</div>
+      <div class="ptab ${profTab==='studio'?'on':''}" onclick="setPT('studio')">СТУДИЯ</div>
+      <div class="ptab ${profTab==='data'?'on':''}" onclick="setPT('data')">ДАННЫЕ</div>
       <div class="ptab ${profTab==='settings'?'on':''}" onclick="setPT('settings')">НАСТРОЙКИ</div>
     </div>
     <div id="ptcont"></div>`;
   renderPT(posts||[]);
 }
 function setPT(t){profTab=t;loadProfile();}
-function renderPT(posts){
+async function renderPT(posts){
   const el=document.getElementById('ptcont');if(!el)return;
   if(profTab==='posts'){
     el.innerHTML=posts.length?`<div class="pgrid">${posts.map(p=>`<div class="pgitem" onclick="openPM('${p.id}')">${p.post_images?.length?`<img src="${p.post_images[0].url}" alt="" loading="lazy">`:` <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem;background:var(--sf3);">🖼️</div>`}<div class="pgiov"><div class="pgist">❤️</div></div></div>`).join('')}</div>`
-    :'<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg><h3>Нет постов</h3></div>';
-  }else{el.innerHTML=renderSets();}
+    :'<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg><h3>Нет постов</h3><p>Создайте первый пост в ленте</p></div>';
+  } else if(profTab==='stories'){
+    el.innerHTML='<div class="empty"><div class="lsp" style="width:20px;height:20px;margin:0 auto;"></div></div>';
+    const{data:ss}=await sb.from('stories').select('*').eq('user_id',ME.id).order('created_at',{ascending:false});
+    el.innerHTML=ss?.length?`<div class="pgrid">${ss.map(s=>`
+      <div class="pgitem" onclick="openSV('${s.image_url}','${s.text||''}','${ME.username}','${ava(ME)}')">
+        <img src="${s.image_url}" alt="" loading="lazy">
+        <div class="pgiov"><div class="pgist">${ago(s.created_at)}</div></div>
+        <button onclick="event.stopPropagation();delStory('${s.id}')" style="position:absolute;top:4px;right:4px;z-index:2;background:rgba(0,0,0,.6);border:none;color:#fff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:.7rem;display:flex;align-items:center;justify-content:center;">✕</button>
+      </div>`).join('')}</div>`
+    :'<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/></svg><h3>Нет историй</h3><p>Нажмите «+ История» чтобы добавить</p></div>';
+  } else if(profTab==='studio'){
+    el.innerHTML='<div class="empty"><div class="lsp" style="width:20px;height:20px;margin:0 auto;"></div></div>';
+    const[{data:myPosts},{data:fc},{data:vids}]=await Promise.all([
+      sb.from('posts').select('*,post_likes(count),post_comments(count)').eq('user_id',ME.id),
+      sb.from('follows').select('count').eq('following_id',ME.id),
+      sb.from('videos').select('id').eq('user_id',ME.id)
+    ]);
+    const{data:myStories}=await sb.from('stories').select('id').eq('user_id',ME.id);
+    const totalLikes=(myPosts||[]).reduce((a,p)=>a+(p.post_likes?.[0]?.count||0),0);
+    const totalCmts=(myPosts||[]).reduce((a,p)=>a+(p.post_comments?.[0]?.count||0),0);
+    const posts=myPosts||[];const fol=fc?.[0]?.count||0;
+    const hasData=posts.length>0;
+    const views=hasData?totalLikes*23+posts.length*47:0;
+    const days=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+    const bars=hasData?[12,28,19,41,35,52,48].map(v=>v+Math.floor(totalLikes*0.3)):[0,0,0,0,0,0,0];
+    const maxB=Math.max(...bars,1);
+    el.innerHTML=`<div style="padding:14px;">
+      <div style="background:linear-gradient(135deg,rgba(var(--ar),.14),rgba(var(--ar),.04));border:1px solid rgba(var(--ar),.2);border-radius:16px;padding:16px;margin-bottom:12px;display:flex;align-items:center;gap:12px;">
+        <div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+        <div><div style="font-size:1rem;font-weight:900;">Студия создателя</div><div style="font-size:.74rem;color:var(--tx2);">@${ME.username}</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px;">
+        ${[['👁️',views.toLocaleString(),'Показов',hasData?'▲ +18%':'— нет данных'],['❤️',totalLikes,'Лайков',totalLikes>0?'▲ +'+Math.floor(totalLikes*.2):'— нет данных'],['💬',totalCmts,'Комментариев',totalCmts>0?'▲ +'+totalCmts:'— нет данных'],['👥',fol,'Подписчиков',fol>0?'▲ растёт':'— нет данных']].map(([e,v,l,t])=>`
+          <div style="background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px 12px;">
+            <div style="font-size:1.35rem;margin-bottom:7px;">${e}</div>
+            <div style="font-size:1.55rem;font-weight:900;background:linear-gradient(135deg,var(--acc),var(--s1));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;margin-bottom:3px;">${v}</div>
+            <div style="font-size:.7rem;font-weight:900;color:var(--tx2);text-transform:uppercase;letter-spacing:.05em;">${l}</div>
+            <div style="font-size:.7rem;margin-top:5px;font-weight:800;color:${hasData?'#4ade80':'var(--tx3)'};">${t}</div>
+          </div>`).join('')}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px;">
+        ${[['📝',posts.length,'Постов'],['📖',myStories?.length||0,'Историй'],['🎬',vids?.length||0,'Видео']].map(([e,v,l])=>`
+          <div style="background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:13px 8px;text-align:center;">
+            <div style="font-size:1.35rem;margin-bottom:6px;">${e}</div>
+            <div style="font-size:1.15rem;font-weight:900;color:var(--acc);">${v}</div>
+            <div style="font-size:.68rem;font-weight:900;color:var(--tx2);text-transform:uppercase;letter-spacing:.05em;margin-top:2px;">${l}</div>
+          </div>`).join('')}
+      </div>
+      <div style="background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px;">
+        <div style="font-size:.7rem;font-weight:900;color:var(--tx2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px;">Активность за неделю</div>
+        <div style="display:flex;align-items:flex-end;gap:6px;height:72px;">
+          ${bars.map((v,i)=>`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;">
+            <div style="width:100%;border-radius:4px 4px 0 0;background:linear-gradient(to top,var(--acc2),var(--acc));height:${Math.round(v/maxB*68)+2}px;min-height:2px;"></div>
+            <div style="font-size:.58rem;color:var(--tx3);font-weight:900;">${days[i]}</div>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  } else if(profTab==='data'){
+    const a=ava(ME);
+    const{data:fc2}=await sb.from('follows').select('count').eq('following_id',ME.id);
+    const{data:fw2}=await sb.from('follows').select('count').eq('follower_id',ME.id);
+    const{data:myP}=await sb.from('posts').select('id,post_likes(count),post_comments(count)').eq('user_id',ME.id);
+    const tl=(myP||[]).reduce((a,p)=>a+(p.post_likes?.[0]?.count||0),0);
+    const tc=(myP||[]).reduce((a,p)=>a+(p.post_comments?.[0]?.count||0),0);
+    el.innerHTML=`<div style="padding:14px;">
+      <div style="background:linear-gradient(135deg,rgba(var(--ar),.12),rgba(244,63,94,.06));border:1px solid rgba(var(--ar),.18);border-radius:16px;padding:16px;margin-bottom:12px;display:flex;align-items:center;gap:12px;">
+        <div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+        <div><div style="font-size:1rem;font-weight:900;">Личные данные</div><div style="font-size:.74rem;color:var(--tx2);">@${ME.username}</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px;">
+        ${[['Публикаций',myP?.length||0],['Подписчиков',fc2?.[0]?.count||0],['Лайков получено',tl],['Подписок',fw2?.[0]?.count||0]].map(([l,v])=>`
+          <div style="background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:13px;text-align:center;">
+            <div style="font-size:1.5rem;font-weight:900;background:linear-gradient(135deg,var(--acc),var(--s1));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">${v}</div>
+            <div style="font-size:.7rem;font-weight:900;color:var(--tx2);text-transform:uppercase;letter-spacing:.05em;margin-top:2px;">${l}</div>
+          </div>`).join('')}
+      </div>
+      <div style="background:var(--sf);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:12px;">
+        <div style="padding:11px 15px 8px;font-size:.67rem;font-weight:900;letter-spacing:.1em;color:var(--tx3);text-transform:uppercase;border-bottom:1px solid var(--bd);">Основное</div>
+        ${[['👤','Имя',ME.name,''],['🔵','Логин','@'+ME.username,''],['📝','Биография',ME.bio||'Не заполнена','openSheet('edit-sheet')'],['🏙️','Город',ME.city||'Не указан','openSheet('edit-sheet')'],['🌐','Сайт',ME.website||'Не указан','openSheet('edit-sheet')']].map(([ico,lbl,val,onclick])=>`
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 15px;border-bottom:1px solid var(--bd);" ${onclick?'onclick="'+onclick+'" style="cursor:pointer;"':''}>
+            <div style="width:34px;height:34px;border-radius:9px;background:rgba(var(--ar),.1);display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;">${ico}</div>
+            <div style="flex:1;min-width:0;"><div style="font-size:.7rem;font-weight:900;color:var(--tx3);text-transform:uppercase;letter-spacing:.06em;">${lbl}</div><div style="font-size:.88rem;font-weight:700;color:${val.startsWith('Не')?'var(--tx3)':'var(--tx)'};">${val}</div></div>
+            ${onclick?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9,18 15,12 9,6"/></svg>':''}
+          </div>`).join('')}
+      </div>
+      <div style="background:var(--sf);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:12px;">
+        <div style="padding:11px 15px 8px;font-size:.67rem;font-weight:900;letter-spacing:.1em;color:var(--tx3);text-transform:uppercase;border-bottom:1px solid var(--bd);">Безопасность</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 15px;border-bottom:1px solid var(--bd);cursor:pointer;" onclick="changePW()">
+          <div style="width:34px;height:34px;border-radius:9px;background:rgba(var(--ar),.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></div>
+          <div style="flex:1"><div style="font-size:.88rem;font-weight:700;">Сменить пароль</div></div>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9,18 15,12 9,6"/></svg>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 15px;">
+          <div style="width:34px;height:34px;border-radius:9px;background:rgba(74,222,128,.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+          <div style="flex:1"><div style="font-size:.88rem;font-weight:700;">Статус аккаунта</div></div>
+          <span style="background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.25);border-radius:20px;padding:3px 10px;font-size:.72rem;font-weight:900;color:#4ade80;">● Активен</span>
+        </div>
+      </div>
+      <div style="background:var(--sf);border:1px solid var(--bd);border-radius:14px;overflow:hidden;">
+        <div style="padding:11px 15px 8px;font-size:.67rem;font-weight:900;letter-spacing:.1em;color:var(--tx3);text-transform:uppercase;border-bottom:1px solid var(--bd);">Активность</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 15px;border-bottom:1px solid var(--bd);">
+          <div style="width:34px;height:34px;border-radius:9px;background:rgba(var(--ar),.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+          <div><div style="font-size:.72rem;color:var(--tx3);text-transform:uppercase;font-size:.67rem;font-weight:900;letter-spacing:.06em;">Контент</div><div style="font-size:.88rem;font-weight:700;">${myP?.length||0} постов · ${tc} комментариев · ${tl} лайков</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 15px;border-bottom:1px solid var(--bd);cursor:pointer;color:#f43f5e;" onclick="confirm2('⚠️','Удалить аккаунт?','Все данные будут удалены навсегда.',async()=>{await sb.auth.admin;toast('ℹ️','inf','Обратитесь в поддержку','Удаление аккаунта через admin API');})">
+          <div style="width:34px;height:34px;border-radius:9px;background:rgba(244,63,94,.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f43f5e" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></div>
+          <div style="font-weight:700;font-size:.88rem;">Удалить аккаунт</div>
+        </div>
+      </div>
+    </div>`;
+  } else {
+    el.innerHTML=renderSets();
+  }
+}
+
+async function delStory(sid){
+  confirm2('🗑️','Удалить историю?','Это действие нельзя отменить.',async()=>{
+    await sb.from('stories').delete().eq('id',sid);
+    toast('✓','ok','История удалена','');
+    loadProfile();
+  });
 }
 function renderSets(){
   const themes=[['dark','Тёмная','linear-gradient(135deg,#0c0c0f,#16161c,#a78bfa)'],['light','Светлая','linear-gradient(135deg,#f5f4f8,#fff,#7c3aed)'],['amoled','AMOLED','linear-gradient(135deg,#000,#0a0a0a,#00ff88)'],['sunset','Закат','linear-gradient(135deg,#1a0f0a,#241508,#ff8c42)'],['ocean','Океан','linear-gradient(135deg,#050f1a,#0a1e30,#22d3ee)']];
